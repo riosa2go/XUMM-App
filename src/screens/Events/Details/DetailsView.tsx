@@ -1,7 +1,8 @@
 /**
  * Transaction Details screen
  */
-import { find } from 'lodash';
+import { find, isEmpty } from 'lodash';
+import moment from 'moment';
 
 import React, { Component } from 'react';
 import {
@@ -16,36 +17,48 @@ import {
     Share,
 } from 'react-native';
 
+import { BackendService, SocketService } from '@services';
+
+import { NodeChain } from '@store/types';
+import { CoreSchema, AccountSchema } from '@store/schemas/latest';
+import CoreRepository from '@store/repositories/core';
+
 import { TransactionsType } from '@common/libs/ledger/transactions/types';
-import { AppScreens, AppConfig } from '@common/constants';
 import { NormalizeCurrencyCode } from '@common/libs/utils';
+
+import { AppScreens, AppConfig } from '@common/constants';
 
 import { ActionSheet } from '@common/helpers/interface';
 import { Navigator } from '@common/helpers/navigator';
 
-import { Header, QRCode, Spacer } from '@components/General';
+import { getAccountName, AccountNameType } from '@common/helpers/resolver';
 
-import { BackendService, SocketService } from '@services';
-
-import CoreRepository from '@store/repositories/core';
-import { CoreSchema } from '@store/schemas/latest';
-
-import { NodeChain } from '@store/types';
+import { Header, Badge, Spacer, Icon } from '@components/General';
+import { RecipientElement } from '@components/Modules';
 
 import Localize from '@locale';
+
 // style
 import { AppStyles } from '@theme';
 import styles from './styles';
 
 /* types ==================================================================== */
+
+export interface PartiesDetails extends AccountNameType {
+    address: string;
+}
+
 export interface Props {
     tx: TransactionsType;
-    account: string;
+    account: AccountSchema;
 }
 
 export interface State {
+    partiesDetails: PartiesDetails;
+    sourceDetails: PartiesDetails;
     coreSettings: CoreSchema;
     connectedChain: NodeChain;
+    incomingTx: boolean;
     scamAlert: boolean;
     showMemo: boolean;
 }
@@ -64,8 +77,19 @@ class TransactionDetailsView extends Component<Props, State> {
         super(props);
 
         this.state = {
+            sourceDetails: {
+                address: '',
+                name: '',
+                source: '',
+            },
+            partiesDetails: {
+                address: '',
+                name: '',
+                source: '',
+            },
             coreSettings: CoreRepository.getSettings(),
             connectedChain: SocketService.chain,
+            incomingTx: props.tx.Destination?.address === props.account.address,
             scamAlert: false,
             showMemo: true,
         };
@@ -74,16 +98,16 @@ class TransactionDetailsView extends Component<Props, State> {
     componentDidMount() {
         InteractionManager.runAfterInteractions(() => {
             this.checkForScamAlert();
+            this.setPartiesDetails();
         });
     }
 
-    checkForScamAlert = async () => {
-        const { tx, account } = this.props;
+    checkForScamAlert = () => {
+        const { tx } = this.props;
+        const { incomingTx } = this.state;
 
         // check for account  scam
-        const incoming = tx.Destination?.address === account;
-
-        if (incoming) {
+        if (incomingTx) {
             BackendService.getAccountRisk(tx.Account.address)
                 .then((accountRisk: any) => {
                     if (accountRisk && accountRisk.danger !== 'UNKNOWN') {
@@ -95,6 +119,59 @@ class TransactionDetailsView extends Component<Props, State> {
                 })
                 .catch(() => {});
         }
+    };
+
+    setPartiesDetails = async () => {
+        const { tx } = this.props;
+        const { incomingTx } = this.state;
+
+        let address = '';
+        let tag;
+
+        switch (tx.Type) {
+            case 'Payment':
+                if (incomingTx) {
+                    address = tx.Account.address;
+                } else {
+                    address = tx.Destination.address;
+                    tag = tx.Destination.tag;
+                }
+                break;
+            case 'AccountDelete':
+                address = tx.Destination.address;
+                break;
+            case 'TrustSet':
+                address = tx.Issuer;
+                break;
+            case 'EscrowCreate':
+                address = tx.Destination.address;
+                tag = tx.Destination.tag;
+                break;
+            case 'EscrowFinish':
+                address = tx.Owner;
+                break;
+            case 'DepositPreauth':
+                address = tx.Authorize || tx.Unauthorize;
+                break;
+            case 'SetRegularKey':
+                address = tx.RegularKey;
+                break;
+            default:
+                break;
+        }
+
+        // no parties details
+        if (!address) return;
+
+        getAccountName(address, tag)
+            .then((res: any) => {
+                if (!isEmpty(res)) {
+                    this.setState({
+                        partiesDetails: Object.assign(res, { address }),
+                    });
+                }
+            })
+            .catch(() => {});
     };
 
     getTransactionLink = () => {
@@ -158,7 +235,6 @@ class TransactionDetailsView extends Component<Props, State> {
 
         return (
             <>
-                {/* <View style={[AppStyles.hr, AppStyles.marginVerticalSml]} /> */}
                 <Text style={[styles.labelText]}>{Localize.t('global.status')}</Text>
                 <Text style={[styles.contentText]}>
                     {tx.TransactionResult.success
@@ -167,7 +243,7 @@ class TransactionDetailsView extends Component<Props, State> {
                     {Localize.t('events.andValidatedInLedger')}
                     <Text style={AppStyles.monoBold}> {tx.LedgerIndex} </Text>
                     {Localize.t('events.onDate')}
-                    <Text style={AppStyles.monoBold}> {tx.Date}</Text>
+                    <Text style={AppStyles.monoBold}> {moment(tx.Date).format('LLLL')}</Text>
                 </Text>
             </>
         );
@@ -205,14 +281,14 @@ class TransactionDetailsView extends Component<Props, State> {
     renderPayment = () => {
         const { tx } = this.props;
 
-        let content = `The payment is from ${tx.Account.address} to ${tx.Destination.address}`;
+        let content = '';
         if (tx.Account.tag) {
-            content += `\nThe payment has a source tag:${tx.Account.tag}`;
+            content += `The payment has a source tag:${tx.Account.tag}\n`;
         }
         if (tx.Destination.tag) {
-            content += `\nThe payment has a destination tag: ${tx.Destination.tag}`;
+            content += `The payment has a destination tag: ${tx.Destination.tag}\n`;
         }
-        content += `\n\nIt was instructed to deliver ${tx.Amount.value} ${NormalizeCurrencyCode(tx.Amount.currency)}`;
+        content += `It was instructed to deliver ${tx.Amount.value} ${NormalizeCurrencyCode(tx.Amount.currency)}`;
         if (tx.tx.SendMax) {
             content += ` by spending up to ${tx.SendMax.value} ${NormalizeCurrencyCode(tx.SendMax.currency)}`;
         }
@@ -290,7 +366,6 @@ class TransactionDetailsView extends Component<Props, State> {
 
         return (
             <>
-                <View style={[AppStyles.hr, AppStyles.marginVerticalSml]} />
                 <Text style={[styles.labelText]}>Description</Text>
                 <Text style={[styles.contentText]}>{content}</Text>
             </>
@@ -336,7 +411,6 @@ class TransactionDetailsView extends Component<Props, State> {
 
         return (
             <>
-                <View style={[AppStyles.hr, AppStyles.marginVerticalSml]} />
                 <Text style={[styles.labelText]}>Transaction cost</Text>
                 <Text style={[styles.contentText]}>
                     Sending this transaction consumed <Text style={AppStyles.monoBold}>{tx.Fee} XRP</Text>
@@ -345,8 +419,100 @@ class TransactionDetailsView extends Component<Props, State> {
         );
     };
 
-    render() {
+    renderTransactionId = () => {
         const { tx } = this.props;
+
+        return (
+            <>
+                <Text style={[styles.labelText]}>Transaction id</Text>
+                <Text selectable style={[styles.hashText]}>
+                    {tx.Hash}
+                </Text>
+            </>
+        );
+    };
+
+    renderHeader = () => {
+        const { tx } = this.props;
+        const { incomingTx } = this.state;
+
+        let iconName = '' as any;
+
+        if (incomingTx) {
+            iconName = 'IconCornerRightDown';
+        } else {
+            iconName = 'IconCornerLeftUp';
+        }
+
+        // show amount for Payment and Account Delete transactions
+        const showAmount = tx.Type === 'Payment' || tx.Type === 'AccountDelete';
+
+        return (
+            <>
+                <Text style={AppStyles.h5}>{tx.Type}</Text>
+                <Spacer />
+                <Badge size="medium" type="success" />
+                <Spacer />
+                <Text style={[styles.dateText]}>{moment(tx.Date).format('LLLL')}</Text>
+                {!!showAmount && (
+                    <View style={[AppStyles.row, styles.amountContainer]}>
+                        <Icon name={iconName} size={27} style={AppStyles.imgColorBlue} />
+                        <Text style={[styles.amountText]}>
+                            {' '}
+                            {tx.Amount.value} {NormalizeCurrencyCode(tx.Amount.currency)}
+                        </Text>
+                    </View>
+                )}
+            </>
+        );
+    };
+
+    renderExtraHeader = () => {
+        const { tx, account } = this.props;
+        const { partiesDetails, incomingTx } = this.state;
+
+        let from = {
+            address: tx.Account.address,
+        } as any;
+        let to = {
+            address: tx.Destination?.address,
+        } as any;
+
+        if (incomingTx) {
+            from = Object.assign(from, partiesDetails);
+            to = Object.assign(to, {
+                name: account.label,
+                source: 'internal:accounts',
+            });
+        } else {
+            to = Object.assign(to, partiesDetails);
+            from = Object.assign(from, {
+                name: account.label,
+                source: 'internal:accounts',
+            });
+        }
+
+        if (!to.address) {
+            return (
+                <>
+                    <Text style={[styles.labelText]}>From</Text>
+                    <RecipientElement recipient={from} showMoreButton />
+                </>
+            );
+        }
+
+        return (
+            <>
+                <Text style={[styles.labelText]}>From</Text>
+                <RecipientElement recipient={from} showMoreButton />
+                <Icon name="IconArrowDown" style={AppStyles.centerSelf} />
+                <Text style={[styles.labelText]}>To</Text>
+                <RecipientElement recipient={to} showMoreButton />
+            </>
+        );
+    };
+
+    render() {
         const { scamAlert } = this.state;
 
         return (
@@ -379,26 +545,17 @@ class TransactionDetailsView extends Component<Props, State> {
                 )}
 
                 <ScrollView testID="transaction-details-view">
-                    <View style={styles.qrCodeContainer}>
-                        <Text
-                            style={[
-                                styles.statusText,
-                                tx.TransactionResult.success ? styles.statusSuccess : styles.statusFailed,
-                            ]}
-                        >
-                            {tx.TransactionResult.success ? 'Success' : 'Failed'}
-                        </Text>
-                        <View style={styles.qrImage}>
-                            {/* eslint-disable-next-line */}
-                            <QRCode size={170} value={this.getTransactionLink()} />
-                        </View>
-                        <Spacer />
-                        <Text style={[styles.hashText]}>{tx.Hash}</Text>
-                    </View>
+                    <View style={styles.headerContainer}>{this.renderHeader()}</View>
+                    <View style={styles.extraHeaderContainer}>{this.renderExtraHeader()}</View>
                     <View style={styles.detailsContainer}>
-                        {this.renderStatus()}
+                        {this.renderTransactionId()}
+                        <Spacer size={30} />
                         {this.renderDescription()}
+                        <Spacer size={30} />
                         {this.renderFee()}
+                        <Spacer size={30} />
+                        {this.renderStatus()}
+                        <Spacer size={30} />
                         {this.renderMemos()}
                     </View>
 
